@@ -214,7 +214,7 @@ This tool is provided for educational and ethical testing purposes only. Users a
 Built with:
 - [Tokio](https://tokio.rs/) - Async runtime for Rust
 - [Futures](https://github.com/rust-lang/futures-rs) - Async abstractions
-- Credits to: sponjibob & cupmister - helped a lot
+- [Credits] - Sponjibob & CupMister - helped a lot
 
 ## 📬 Contact
 
