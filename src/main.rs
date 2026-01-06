@@ -10,30 +10,30 @@ pub const HIGHEST_PORT_NUMBER: u16 = 65535;
 
 pub struct PortScanner {
     target: IpAddr,
-    concurrent_limit: usize;
-    timeout: Duration;
+    concurrent_limit: usize,
+    timeout: Duration,
 }
 
 impl PortScanner {
-    pub fn new(ip: IpAddr) -> Self {
+    pub fn new(target: IpAddr) -> Self {
         Self {
             target,
             concurrent_limit: 10000,
             timeout: Duration::from_millis(50),
         }
     }
-    pub fn with_concurrent_limit(must self, limit: usize) -> Self {
+    pub fn with_concurrent_limit(mut self, limit: usize) -> Self {
         self.concurrent_limit = limit;
         self
     }
 
-    pub fn with_timeout(mut self, limit: usize) -> Self {
-        self.timeout = timeout;
+    pub fn with_timeout(mut self, timeout_duration: usize) -> Self {
+        self.timeout = timeout_duration;
         self
     }
 
     pub async fn run(&self, start_port: u16, end_port: u16) -> Vec<u16> {
-        let mut oprn_ports = Vec::new();
+        let mut open_ports = Vec::new();
         let mut futures = FuturesUnordered::new();
         let mut current_port = start_port;
 
@@ -83,6 +83,7 @@ fn print_usage() {
     println!("  cargo run -- <ip> all fast");
 }
 
+#[tokio::main]
 async fn main() {
     println!("==== Rust Port Scanner ====\n");
 
@@ -94,8 +95,8 @@ async fn main() {
 
     // let start_time = std::time::Instant::now();
 
-    let scanner = PortScanner::new(target, 1, 65535);
-    let open_ports = scanner.scan().await;
+    let scanner = PortScanner::new(target);
+    let open_ports = scanner.run(1, 65535).await;
 
     // let elapsed = start_time.elapsed();
 
