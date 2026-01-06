@@ -49,9 +49,9 @@ impl PortScanner {
                 open_ports.push(port);
             }
 
-            if current_port <= end_port {
-                futures.push(self.scan_port(current_port));
+            if current_port < end_port {
                 current_port += 1;
+                futures.push(self.scan_port(current_port));
             }
         }
 
@@ -93,7 +93,7 @@ if args.len() < 3 {
 }
 
 let target = args[1].parse::<IpAddr>()
-    .map_err(|_| format!("Invalid Ip address: {}" args[1]))?;
+    .map_err(|_| format!("Invalid Ip address: {}", args[1]))?;
 
 let (start_port, end_port) = if args.len() == 3 || (args.len() > 3 && args[3] == "fast") {
     match args[2].to_lowercase().as_str() {
@@ -120,7 +120,7 @@ let (start_port, end_port) = if args.len() == 3 || (args.len() > 3 && args[3] ==
 let is_fast_mode = args.iter().any(|arg| arg == "fast");
 
 let timeout = if is_fast_mode {
-    Duration::form_millis(50)
+    Duration::from_millis(50)
 } else if args.len() > 4 && args[4] != "fast" {
     Duration::from_millis(args[4].parse::<u64>()
         .map_err(|_| format!("Invalid timeout: {}", args[4]))?)
@@ -132,35 +132,85 @@ let concurrent = if is_fast_mode {
     15000
 } else if args.len() > 5 {
     args[5].parse::<usize>()
-        .map_err(|_| format!("Invalid concurrent limit: {}", args[5]))?;
+        .map_err(|_| format!("Invalid concurrent limit: {}", args[5]))?
 } else {
     10000
 };
-ok((target, start_port, end_port, timeout, concurrent))
+Ok((target, start_port, end_port, timeout, concurrent))
+}
 
 #[tokio::main]
 async fn main() {
-    println!("==== Rust Port Scanner ====\n");
+    println!("---- Port Scanner ----\n");
 
-    let target = "98.84.224.111".parse::<IpAddr>().unwrap();
+    let (target, start_port, end_port, timeout, concurrent) = match parse_args() {
+        Ok(args) => args,
+        Err(err) => {
+            eprintln!("Error: {}\n", err);
+            print_usage();
+            std::process::exit(1);
+        }
+    };
 
-    println!("Scanning target: {}", target);
-    println!("Port range: 1-65535");
-    println!("Starting scan... \n");
+    let total_ports = end_port - start_port + 1;
 
-    // let start_time = std::time::Instant::now();
+    println!("Target:          {}", target);
+    println!("Port range:      {}-{}", start_port, end_port);
+    println!("Total ports:     {}", total_ports);
+    println!("Concurrent:      {} tasks", concurrent);
+    println!("Timeout:         {:?} per port", timeout);
 
-    let scanner = PortScanner::new(target);
-    let open_ports = scanner.run(1, 65535).await;
+    if concurrent > 10000 {
+        println!("\nWARNING: Running in EXTREME MODE!");
+        println!("   This may trigger rate limits or firewalls.");
+    }
 
-    // let elapsed = start_time.elapsed();
+    println!("\nStarting scan...\n");
+
+    let start_time = std::time::Instant::now();
+
+    let scanner = PortScanner::new(target)
+        .with_timeout(timeout)
+        .with_concurrent_limit(concurrent);
+
+    let open_ports = scanner.run(start_port, end_port).await;
+
+    let elapsed = start_time.elapsed();
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     if open_ports.is_empty() {
         println!("No open ports found.");
     } else {
-        println!("Found {} open port(s):", open_ports.len());
+        println!("Found {} open port(s):\n", open_ports.len());
+
         for port in &open_ports {
-            println!("  Port {} is OPEN", port);
+            let service = match port {
+                21 => "FTP",
+                22 => "SSH",
+                23 => "Telnet",
+                25 => "SMTP",
+                53 => "DNS",
+                80 => "HTTP",
+                110 => "POP3",
+                143 => "IMAP",
+                443 => "HTTPS",
+                445 => "SMB",
+                3306 => "MySQL",
+                3389 => "RDP",
+                5432 => "PostgreSQL",
+                5900 => "VNC",
+                8080 => "HTTP-Alt",
+                _ => "Unknown",
+            };
+            println!("  Port {:5} - {}", port, service);
         }
     }
+
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Scan completed in {:.2?}", elapsed);
+    println!("Scanned {} ports at {:.0} ports/sec",
+             total_ports,
+             total_ports as f64 / elapsed.as_secs_f64());
 }
+
