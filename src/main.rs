@@ -1,15 +1,17 @@
-use std::net::{TcpStream, SocketAddr, IpAddr};
+use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
-use std::sync::{Arc, Mutex};
-use std::thread;
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+use futures::stream::{FuturesUnordered, StreamExt};
 
 struct PortScanner {
     target: IpAddr,
     start_port: u16,
     end_port: u16,
     timeout: Duration,
-    threads: usize,
+    concurrent_limit: usize,
 }
+
 impl PortScanner {
     fn new( target: IpAddr, start_port: u16, end_port: u16 ) -> Self {
         Self {
@@ -17,75 +19,69 @@ impl PortScanner {
             start_port,
             end_port,
             timeout: Duration::from_millis(500),
-            threads: 100,
+            concurrent_limit: 100,
         }
     }
-    fn scan(&self) -> Vec<u16> {
-        let open_ports = Arc::new(Mutex::new(Vec::new()));
-        let mut handles = vec![];
 
-        let total_ports = (self.end_port - self.start_port + 1) as usize;
-        let chunk_size = (total_ports + self.threads - 1) / self.threads;
+    async fn scan(&self) -> Vec<u16> {
+        let mut open_ports = Vec::new();
+        let mut futures = FuturesUnordered::new();
+        let mut port = self.start_port;
 
-        for thread_id in 0..self.threads {
-            let start = self.start_port + (thread_id * chunk_size) as u16;
-            let end = std::cmp::min(
-                start + chunk_size as u16 - 1,
-                self.end_port
-            );
 
-            if start > self.end_port {
-                break;
+        for _ in 0..self.concurrent_limit.min((self.end_port - self.start_port - self.start_port + 1) as usize) {
+            if port <= self.end_port {
+                futures.push(self.check_port(port));
+                port += 1;
+            }
+    }
+
+        while let Some(result) = futures.next().await {
+            if let Some(open_port) = result {
+                open_ports.push(open_port);
             }
 
-            let target = self.target;
-            let timeout = self.timeout;
-            let open_ports = Arc::clone(&open_ports);
-
-            let handle = thread::spawn(move || {
-                for port in start..=end {
-                    if Self::check_port(target, port, timeout) {
-                        let mut ports = open_ports.lock().unwrap();
-                        ports.push(port);
-                    }
-                }
-            });
-
-            handles.push(handle);
+            if port <= self.end_port {
+                futures.push(self.check_port(port));
+                port += 1;
+            }
         }
 
-        for handle in handles {
-            handle.join().unwrap();
+        open_ports.sort();
+        open_ports
+}
+    async fn check_port(&self, port: u16) -> Option<u16> {
+        let socket_addr = SocketAddr::new(self.target, port);
+
+        match timeout(self.timeout, TcpStream::connect(socket_addr)).await {
+            Ok(Ok(_)) => Some(port),
+            _ => None,
         }
-
-        let mut result = open_ports.lock().unwrap().clone();
-        result.sort();
-        result
-    }
-
-    fn check_port(target: IpAddr, port: u16, timeout: Duration) -> bool {
-        let socket_addr = SocketAddr::new(target, port);
-        TcpStream::connect_timeout(&socket_addr, timeout).is_ok()
     }
 }
 
-fn main() {
-    println!("==== Rust Port Scanner ====");
+#[tokio::main]
+async fn main() {
+    println!("==== Rust Port Scanner ====\n");
 
     let target = "192.168.1.1".parse::<IpAddr>().unwrap();
 
     println!("Scanning target: {}", target);
-    println!("Port range: 1-1000");
+    println!("Port range: 1-7000");
     println!("Starting scan... \n");
 
-    let scanner = PortScanner::new(target, 1, 1000);
-    let open_ports = scanner.scan();
+    // let start_time = std::time::Instant::now();
+
+    let scanner = PortScanner::new(target, 1, 7000);
+    let open_ports = scanner.scan().await;
+
+    // let elapsed = start_time.elapsed();
 
     if open_ports.is_empty() {
         println!("No open ports found.");
     } else {
         println!("Found {} open port(s):", open_ports.len());
-        for port in open_ports {
+        for port in &open_ports {
             println!("  Port {} is OPEN", port);
         }
     }
