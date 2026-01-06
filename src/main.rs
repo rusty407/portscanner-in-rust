@@ -16,7 +16,7 @@ impl PortScanner {
         Self {
             target,
             concurrent_limit: 10000,
-            timeout: Duration::from_millis(50),
+            timeout: Duration::from_millis(450),
         }
     }
     pub fn with_concurrent_limit(mut self, limit: usize) -> Self {
