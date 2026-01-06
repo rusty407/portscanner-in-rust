@@ -20,7 +20,7 @@ A blazing-fast, concurrent port scanner written in Rust using async/await and To
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/port-scanner.git
+git clone https://github.com/rusty407/portscanner-in-rust.git
 cd port-scanner
 
 # Build the project
