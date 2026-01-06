@@ -27,7 +27,7 @@ impl PortScanner {
         self
     }
 
-    pub fn with_timeout(mut self, timeout_duration: usize) -> Self {
+    pub fn with_timeout(mut self, timeout_duration: Duration) -> Self {
         self.timeout = timeout_duration;
         self
     }
