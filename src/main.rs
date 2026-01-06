@@ -5,9 +5,6 @@ use std::env;
 use tokio::time::timeout;
 use futures::stream::{FuturesUnordered, StreamExt};
 
-pub const LOWEST_PORT_NUMBER: u16 = 1;
-pub const HIGHEST_PORT_NUMBER: u16 = 65535;
-
 pub struct PortScanner {
     target: IpAddr,
     concurrent_limit: usize,
@@ -213,4 +210,3 @@ async fn main() {
              total_ports,
              total_ports as f64 / elapsed.as_secs_f64());
 }
-
