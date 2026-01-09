@@ -122,7 +122,7 @@ let timeout = if is_fast_mode {
     Duration::from_millis(args[4].parse::<u64>()
         .map_err(|_| format!("Invalid timeout: {}", args[4]))?)
 } else {
-    Duration::from_millis(450)
+    Duration::from_millis(500)
 };
 
 let concurrent = if is_fast_mode {
@@ -131,7 +131,7 @@ let concurrent = if is_fast_mode {
     args[5].parse::<usize>()
         .map_err(|_| format!("Invalid concurrent limit: {}", args[5]))?
 } else {
-    10000
+    1000
 };
 Ok((target, start_port, end_port, timeout, concurrent))
 }
