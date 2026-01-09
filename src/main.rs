@@ -122,7 +122,7 @@ let timeout = if is_fast_mode {
     Duration::from_millis(args[4].parse::<u64>()
         .map_err(|_| format!("Invalid timeout: {}", args[4]))?)
 } else {
-    Duration::from_millis(50)
+    Duration::from_millis(450)
 };
 
 let concurrent = if is_fast_mode {
