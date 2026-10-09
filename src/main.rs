@@ -1,10 +1,10 @@
 use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
-use std::env;
 use std::io;
-use tokio::time::timeout;
+use tokio::time::{sleep_until, timeout, Instant};
 use futures::stream::{FuturesUnordered, StreamExt};
+use clap::{CommandFactory, Parser, error::ErrorKind};
 
 pub struct ScanResult {
     pub open_ports: Vec<u16>,
@@ -21,14 +21,16 @@ pub struct PortScanner {
     target: IpAddr,
     concurrent_limit: usize,
     timeout: Duration,
+    rate_interval: Option<Duration>,
 }
 
 impl PortScanner {
     pub fn new(target: IpAddr) -> Self {
         Self {
             target,
-            concurrent_limit: 10000,
-            timeout: Duration::from_millis(450),
+            concurrent_limit: 1000,
+            timeout: Duration::from_millis(500),
+            rate_interval: None,
         }
     }
     pub fn with_concurrent_limit(mut self, limit: usize) -> Self {
@@ -41,15 +43,32 @@ impl PortScanner {
         self
     }
 
-    pub async fn run(&self, start_port: u16, end_port: u16) -> ScanResult {
+    /// Start at most `per_second` connections per second. Must be at least 1.
+    pub fn with_rate(mut self, per_second: u32) -> Self {
+        self.rate_interval = Some(Duration::from_secs(1) / per_second);
+        self
+    }
+
+    pub async fn run(&self, ports: Vec<u16>) -> ScanResult {
         let mut open_ports = Vec::new();
         let mut errors = Vec::new();
         let mut futures = FuturesUnordered::new();
-        // The iterator hands out each port exactly once and can't overflow at 65535.
-        let mut ports = start_port..=end_port;
+        let mut ports = ports.into_iter();
+
+        // With a rate limit, each connection gets a start time at least `interval` after the
+        // previous one. If the scan falls behind, it starts from "now" instead of bursting to
+        // catch up.
+        let mut next_start = Instant::now();
+        let mut schedule = || {
+            self.rate_interval.map(|interval| {
+                let start_at = next_start.max(Instant::now());
+                next_start = start_at + interval;
+                start_at
+            })
+        };
 
         for port in ports.by_ref().take(self.concurrent_limit) {
-            futures.push(self.scan_port(port));
+            futures.push(self.scan_port(port, schedule()));
         }
 
         while let Some((port, state)) = futures.next().await {
@@ -60,7 +79,7 @@ impl PortScanner {
             }
 
             if let Some(port) = ports.next() {
-                futures.push(self.scan_port(port));
+                futures.push(self.scan_port(port, schedule()));
             }
         }
 
@@ -69,7 +88,11 @@ impl PortScanner {
         ScanResult { open_ports, errors }
     }
 
-    async fn scan_port(&self, port: u16) -> (u16, PortState) {
+    async fn scan_port(&self, port: u16, start_at: Option<Instant>) -> (u16, PortState) {
+        if let Some(start_at) = start_at {
+            sleep_until(start_at).await;
+        }
+
         let socket = SocketAddr::new(self.target, port);
 
         let state = match timeout(self.timeout, TcpStream::connect(socket)).await {
@@ -87,99 +110,105 @@ impl PortScanner {
     }
 }
 
-fn print_usage() {
-    println!("Usage: cargo run -- <target> <start_port> <end_port> [timeout_ms] [concurrent_limit]");
-    println!("\nExamples:");
-    println!("  cargo run -- 127.0.0.1 1 1000                    # Scan ports 1-1000");
-    println!("  cargo run -- 192.168.1.1 1 65535                 # Scan ALL ports");
-    println!("  cargo run -- 127.0.0.1 1 65535 50 15000          # INSANE SPEED MODE");
-    println!("\nSpecial shortcuts:");
-    println!("  cargo run -- <ip> all                            # Scans all 65535 ports");
-    println!("  cargo run -- <ip> common                         # Scans ports 1-1000");
-    println!("\nSpeed presets:");
-    println!("  Add 'fast' to use aggressive settings:          # 50ms timeout, 15000 concurrent");
-    println!("  cargo run -- <ip> all fast");
+/// Fast async TCP port scanner
+#[derive(Parser)]
+#[command(version)]
+struct Cli {
+    /// IP address to scan (IPv4 or IPv6)
+    target: IpAddr,
+
+    /// Ports to scan: "all", "common" (1-1000), or a list like 22,80,443,8000-9000
+    #[arg(short, long, default_value = "common")]
+    ports: String,
+
+    /// How long to wait for each port to answer, in milliseconds
+    #[arg(short, long, value_name = "MS", default_value_t = 500, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout: u64,
+
+    /// How many connection attempts can run at the same time
+    #[arg(short, long, value_name = "N", default_value_t = 1000, value_parser = clap::value_parser!(u32).range(1..))]
+    concurrency: u32,
+
+    /// Start at most this many connections per second [default: no limit]
+    #[arg(short, long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..))]
+    rate: Option<u32>,
+
+    /// Scan ports in random order instead of 1, 2, 3, ...
+    #[arg(short, long)]
+    shuffle: bool,
+
+    /// Speed preset: 50ms timeout and 15000 connections at once
+    #[arg(long, conflicts_with_all = ["timeout", "concurrency"])]
+    fast: bool,
 }
 
-fn parse_args() -> Result<(IpAddr, u16, u16, Duration, usize), String> {
-let args: Vec<String> = env::args().collect();
+/// Parses "all", "common", or a comma-separated list of ports and ranges like "22,80,8000-9000".
+/// Returns the ports sorted, without duplicates.
+fn parse_ports(spec: &str) -> Result<Vec<u16>, String> {
+    let mut ports = Vec::new();
 
-if args.len() < 3 {
-    return Err("You need more arguments".to_string());
+    for part in spec.split(',').map(str::trim) {
+        match part {
+            "all" => ports.extend(1..=65535),
+            "common" => ports.extend(1..=1000),
+            _ => {
+                let (start, end) = match part.split_once('-') {
+                    Some((start, end)) => (parse_port(start)?, parse_port(end)?),
+                    None => (parse_port(part)?, parse_port(part)?),
+                };
+                if start > end {
+                    return Err(format!("invalid range {part}: start is after end"));
+                }
+                ports.extend(start..=end);
+            }
+        }
+    }
+
+    ports.sort_unstable();
+    ports.dedup();
+    Ok(ports)
 }
 
-let target = args[1].parse::<IpAddr>()
-    .map_err(|_| format!("Invalid Ip address: {}", args[1]))?;
-
-let (start_port, end_port) = if args.len() == 3 || (args.len() > 3 && args[3] == "fast") {
-    match args[2].to_lowercase().as_str() {
-        "all" => (1u16, 65535u16),
-        "common" => (1u16, 1000u16),
-        _ => return Err("Invalid argument. Use 'all', 'common', or specify start and end ports".to_string()),
+fn parse_port(s: &str) -> Result<u16, String> {
+    match s.trim().parse::<u16>() {
+        Ok(0) | Err(_) => Err(format!("invalid port '{s}' (must be 1-65535)")),
+        Ok(port) => Ok(port),
     }
-} else {
-    let start = args[2].parse::<u16>()
-        .map_err(|_| format!("Invalid start port: {}", args[2]))?;
-    let end = args[3].parse::<u16>()
-        .map_err(|_| format!("Invalid end port: {}", args[3]))?;
-
-    if start > end {
-        return Err("Start port must be <= end port".to_string());
-    }
-    if start == 0 {
-        return Err("Port 0 is not valid".to_string());
-    }
-
-    (start, end)
-};
-
-let is_fast_mode = args.iter().any(|arg| arg == "fast");
-
-let timeout = if is_fast_mode {
-    Duration::from_millis(50)
-} else if args.len() > 4 && args[4] != "fast" {
-    Duration::from_millis(args[4].parse::<u64>()
-        .map_err(|_| format!("Invalid timeout: {}", args[4]))?)
-} else {
-    Duration::from_millis(500)
-};
-
-let concurrent = if is_fast_mode {
-    15000
-} else if args.len() > 5 {
-    args[5].parse::<usize>()
-        .map_err(|_| format!("Invalid concurrent limit: {}", args[5]))?
-} else {
-    1000
-};
-
-if concurrent == 0 {
-    return Err("Concurrent limit must be at least 1".to_string());
-}
-
-Ok((target, start_port, end_port, timeout, concurrent))
 }
 
 #[tokio::main]
 async fn main() {
-    println!("---- Port Scanner ----\n");
+    let cli = Cli::parse();
 
-    let (target, start_port, end_port, timeout, concurrent) = match parse_args() {
-        Ok(args) => args,
-        Err(err) => {
-            eprintln!("Error: {}\n", err);
-            print_usage();
-            std::process::exit(1);
-        }
+    let mut ports = match parse_ports(&cli.ports) {
+        Ok(ports) => ports,
+        Err(err) => Cli::command().error(ErrorKind::ValueValidation, err).exit(),
+    };
+    if cli.shuffle {
+        fastrand::shuffle(&mut ports);
+    }
+
+    let (timeout, concurrent) = if cli.fast {
+        (Duration::from_millis(50), 15000)
+    } else {
+        (Duration::from_millis(cli.timeout), cli.concurrency as usize)
     };
 
-    let total_ports = end_port - start_port + 1;
+    let total_ports = ports.len();
 
-    println!("Target:          {}", target);
-    println!("Port range:      {}-{}", start_port, end_port);
+    println!("---- Port Scanner ----\n");
+    println!("Target:          {}", cli.target);
+    println!("Ports:           {}", cli.ports);
     println!("Total ports:     {}", total_ports);
     println!("Concurrent:      {} tasks", concurrent);
     println!("Timeout:         {:?} per port", timeout);
+    match cli.rate {
+        Some(rate) => println!("Rate limit:      {} connections/sec (takes at least {:.0?})",
+                               rate,
+                               Duration::from_secs_f64(total_ports as f64 / rate as f64)),
+        None => println!("Rate limit:      none"),
+    }
+    println!("Order:           {}", if cli.shuffle { "random" } else { "sequential" });
 
     if concurrent > 10000 {
         println!("\nWARNING: Running in EXTREME MODE!");
@@ -190,11 +219,14 @@ async fn main() {
 
     let start_time = std::time::Instant::now();
 
-    let scanner = PortScanner::new(target)
+    let mut scanner = PortScanner::new(cli.target)
         .with_timeout(timeout)
         .with_concurrent_limit(concurrent);
+    if let Some(rate) = cli.rate {
+        scanner = scanner.with_rate(rate);
+    }
 
-    let ScanResult { open_ports, errors } = scanner.run(start_port, end_port).await;
+    let ScanResult { open_ports, errors } = scanner.run(ports).await;
 
     let elapsed = start_time.elapsed();
 
@@ -253,7 +285,7 @@ mod tests {
 
         // With a limit of 2, `port` is the first one queued after the initial batch.
         let scanner = PortScanner::new("127.0.0.1".parse().unwrap()).with_concurrent_limit(2);
-        let result = scanner.run(port - 2, port).await;
+        let result = scanner.run((port - 2..=port).collect()).await;
 
         assert!(result.open_ports.contains(&port));
     }
@@ -261,6 +293,30 @@ mod tests {
     #[tokio::test]
     async fn range_ending_at_65535_does_not_overflow() {
         let scanner = PortScanner::new("127.0.0.1".parse().unwrap()).with_concurrent_limit(10);
-        scanner.run(65530, 65535).await;
+        scanner.run(parse_ports("65530-65535").unwrap()).await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_spaces_out_connections() {
+        let scanner = PortScanner::new("127.0.0.1".parse().unwrap()).with_rate(100);
+        let start = Instant::now();
+        scanner.run((40000..40020).collect()).await;
+
+        // 20 connections at 100/sec: the last one can't start before 190ms.
+        assert!(start.elapsed() >= Duration::from_millis(190));
+    }
+
+    #[test]
+    fn parses_port_lists() {
+        assert_eq!(parse_ports("80,22, 8000-8002,22").unwrap(), vec![22, 80, 8000, 8001, 8002]);
+        assert_eq!(parse_ports("common").unwrap(), (1..=1000).collect::<Vec<u16>>());
+        assert_eq!(parse_ports("all").unwrap().len(), 65535);
+    }
+
+    #[test]
+    fn rejects_bad_ports() {
+        for spec in ["0", "65536", "90-80", "abc", "", "80,", "1-2-3"] {
+            assert!(parse_ports(spec).is_err(), "{spec:?} should be rejected");
+        }
     }
 }
