@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="440" height="510" viewBox="0 0 440 510" role="img" aria-label="Port scanner finding 5 open ports on localhost">
+<style>text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;font-size:14px;fill:#c9d1d9}.p{fill:#3fb950}.c{fill:#f0f6fc}</style>
+<rect x="0.5" y="0.5" width="439" height="509" rx="10" fill="#0d1117" stroke="#30363d"/>
+<path d="M0.5 34 V10.5 a10 10 0 0 1 10 -10 H429.5 a10 10 0 0 1 10 10 V34 Z" fill="#161b22"/>
+<line x1="0.5" y1="34" x2="439.5" y2="34" stroke="#30363d"/>
+<circle cx="20" cy="17.0" r="6" fill="#ff5f56"/>
+<circle cx="40" cy="17.0" r="6" fill="#ffbd2e"/>
+<circle cx="60" cy="17.0" r="6" fill="#27c93f"/>
+<text x="20" y="60" xml:space="preserve"><tspan class="p">$</tspan> <tspan class="c">cargo run -q --release -- 127.0.0.1 all</tspan></text>
+<text x="20" y="80" xml:space="preserve">---- Port Scanner ----</text>
+<text x="20" y="120" xml:space="preserve">Target:          127.0.0.1</text>
+<text x="20" y="140" xml:space="preserve">Port range:      1-65535</text>
+<text x="20" y="160" xml:space="preserve">Total ports:     65535</text>
+<text x="20" y="180" xml:space="preserve">Concurrent:      1000 tasks</text>
+<text x="20" y="200" xml:space="preserve">Timeout:         500ms per port</text>
+<text x="20" y="240" xml:space="preserve">Starting scan...</text>
+<line x1="20" y1="275" x2="347.6" y2="275" stroke="#8b949e" stroke-width="2"/>
+<text x="20" y="300" xml:space="preserve">Found 5 open port(s):</text>
+<text x="20" y="340" xml:space="preserve">  Port    22 - SSH</text>
+<text x="20" y="360" xml:space="preserve">  Port    80 - HTTP</text>
+<text x="20" y="380" xml:space="preserve">  Port   443 - HTTPS</text>
+<text x="20" y="400" xml:space="preserve">  Port  3306 - MySQL</text>
+<text x="20" y="420" xml:space="preserve">  Port  8080 - HTTP-Alt</text>
+<line x1="20" y1="435" x2="347.6" y2="435" stroke="#8b949e" stroke-width="2"/>
+<text x="20" y="460" xml:space="preserve">Scan completed in 1.60s</text>
+<text x="20" y="480" xml:space="preserve">Scanned 65535 ports at 40957 ports/sec</text>
+</svg>
