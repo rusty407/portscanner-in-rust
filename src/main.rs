@@ -2,8 +2,20 @@ use std::net::{SocketAddr, IpAddr};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use std::env;
+use std::io;
 use tokio::time::timeout;
 use futures::stream::{FuturesUnordered, StreamExt};
+
+pub struct ScanResult {
+    pub open_ports: Vec<u16>,
+    pub errors: Vec<(u16, io::Error)>,
+}
+
+enum PortState {
+    Open,
+    Closed,
+    Error(io::Error),
+}
 
 pub struct PortScanner {
     target: IpAddr,
@@ -29,42 +41,49 @@ impl PortScanner {
         self
     }
 
-    pub async fn run(&self, start_port: u16, end_port: u16) -> Vec<u16> {
+    pub async fn run(&self, start_port: u16, end_port: u16) -> ScanResult {
         let mut open_ports = Vec::new();
+        let mut errors = Vec::new();
         let mut futures = FuturesUnordered::new();
-        let mut current_port = start_port;
+        // The iterator hands out each port exactly once and can't overflow at 65535.
+        let mut ports = start_port..=end_port;
 
-        for _ in 0..self.concurrent_limit.min((end_port - start_port + 1) as usize) {
-            if current_port <= end_port {
-                futures.push(self.scan_port(current_port));
-                current_port += 1;
-            }
+        for port in ports.by_ref().take(self.concurrent_limit) {
+            futures.push(self.scan_port(port));
         }
 
-        while let Some(result) = futures.next().await {
-            if let Some(port) = result {
-                open_ports.push(port);
+        while let Some((port, state)) = futures.next().await {
+            match state {
+                PortState::Open => open_ports.push(port),
+                PortState::Closed => {}
+                PortState::Error(err) => errors.push((port, err)),
             }
 
-            if current_port < end_port {
-                current_port += 1;
-                futures.push(self.scan_port(current_port));
+            if let Some(port) = ports.next() {
+                futures.push(self.scan_port(port));
             }
         }
 
         open_ports.sort();
-        open_ports
+        errors.sort_by_key(|(port, _)| *port);
+        ScanResult { open_ports, errors }
     }
 
-    async fn scan_port(&self, port: u16) -> Option<u16> {
+    async fn scan_port(&self, port: u16) -> (u16, PortState) {
         let socket = SocketAddr::new(self.target, port);
 
-        match timeout(self.timeout, TcpStream::connect(socket)).await {
-            Ok(Ok(_)) => Some(port),
-            _ => None,
-        }
-
-
+        let state = match timeout(self.timeout, TcpStream::connect(socket)).await {
+            // On localhost the kernel can pick the target port as our source port, so the
+            // socket "connects" to itself. That's not a real listener.
+            Ok(Ok(stream)) if stream.local_addr().ok() == Some(socket) => PortState::Closed,
+            Ok(Ok(_)) => PortState::Open,
+            Ok(Err(err)) if err.kind() == io::ErrorKind::ConnectionRefused => PortState::Closed,
+            // Anything else (e.g. "Too many open files") means the port wasn't actually checked.
+            Ok(Err(err)) => PortState::Error(err),
+            // No reply in time: closed or filtered by a firewall.
+            Err(_) => PortState::Closed,
+        };
+        (port, state)
     }
 }
 
@@ -133,6 +152,11 @@ let concurrent = if is_fast_mode {
 } else {
     1000
 };
+
+if concurrent == 0 {
+    return Err("Concurrent limit must be at least 1".to_string());
+}
+
 Ok((target, start_port, end_port, timeout, concurrent))
 }
 
@@ -170,7 +194,7 @@ async fn main() {
         .with_timeout(timeout)
         .with_concurrent_limit(concurrent);
 
-    let open_ports = scanner.run(start_port, end_port).await;
+    let ScanResult { open_ports, errors } = scanner.run(start_port, end_port).await;
 
     let elapsed = start_time.elapsed();
 
@@ -204,9 +228,39 @@ async fn main() {
         }
     }
 
+    if let Some((port, err)) = errors.first() {
+        println!("\nWARNING: {} port(s) could not be scanned, results may be incomplete.", errors.len());
+        println!("   First error (port {}): {}", port, err);
+        println!("   If it says \"Too many open files\", lower the concurrent limit or run `ulimit -n 65535` first.");
+    }
+
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Scan completed in {:.2?}", elapsed);
     println!("Scanned {} ports at {:.0} ports/sec",
              total_ports,
              total_ports as f64 / elapsed.as_secs_f64());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn scans_first_port_after_initial_batch() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // With a limit of 2, `port` is the first one queued after the initial batch.
+        let scanner = PortScanner::new("127.0.0.1".parse().unwrap()).with_concurrent_limit(2);
+        let result = scanner.run(port - 2, port).await;
+
+        assert!(result.open_ports.contains(&port));
+    }
+
+    #[tokio::test]
+    async fn range_ending_at_65535_does_not_overflow() {
+        let scanner = PortScanner::new("127.0.0.1".parse().unwrap()).with_concurrent_limit(10);
+        scanner.run(65530, 65535).await;
+    }
 }
